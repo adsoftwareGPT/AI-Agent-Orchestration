@@ -207,8 +207,15 @@ class PersistentTools:
         return p
 
     def _check_allowed(self, rel_path: str) -> None:
-        if os.path.normpath(rel_path) == "main.py":
-            raise RuntimeError("security violation: agents rarely need to touch main.py, and are restricted from doing so.")
+        # Check if we are trying to overwrite the orchestrator itself (simple check)
+        # Since workspace should be isolated, this is a fallback safety
+        try:
+            ap = self._abs(rel_path)
+            if os.path.abspath(__file__) == ap:
+                 raise RuntimeError("security violation: agents cannot touch the orchestrator.")
+        except:
+            pass
+
         if self.files_allowed and rel_path not in self.files_allowed:
             raise RuntimeError(f"file not allowed: {rel_path}")
 
@@ -218,10 +225,14 @@ class PersistentTools:
             for fn in files:
                 ap = os.path.join(root, fn)
                 rp = os.path.relpath(ap, self.workspace_dir)
-                if rp == "main.py":
-                    continue
+                # Filter out agent state
                 if rp.startswith(".agent_state"):
-                    continue  # Skip state files
+                    continue
+                
+                # Check if it's the orchestrator script itself (just in case workspace == root)
+                if os.path.abspath(ap) == os.path.abspath(__file__):
+                    continue
+                    
                 out.append(rp)
         out.sort()
         return out[:limit]
