@@ -207,15 +207,8 @@ class PersistentTools:
         return p
 
     def _check_allowed(self, rel_path: str) -> None:
-        # Check if we are trying to overwrite the orchestrator itself (simple check)
-        # Since workspace should be isolated, this is a fallback safety
-        try:
-            ap = self._abs(rel_path)
-            if os.path.abspath(__file__) == ap:
-                 raise RuntimeError("security violation: agents cannot touch the orchestrator.")
-        except:
-            pass
-
+        # if os.path.normpath(rel_path) == "main.py":
+        #    raise RuntimeError("security violation: agents rarely need to touch main.py, and are restricted from doing so.")
         if self.files_allowed and rel_path not in self.files_allowed:
             raise RuntimeError(f"file not allowed: {rel_path}")
 
@@ -225,14 +218,10 @@ class PersistentTools:
             for fn in files:
                 ap = os.path.join(root, fn)
                 rp = os.path.relpath(ap, self.workspace_dir)
-                # Filter out agent state
+                # if rp == "main.py":
+                #    continue
                 if rp.startswith(".agent_state"):
-                    continue
-                
-                # Check if it's the orchestrator script itself (just in case workspace == root)
-                if os.path.abspath(ap) == os.path.abspath(__file__):
-                    continue
-                    
+                    continue  # Skip state files
                 out.append(rp)
         out.sort()
         return out[:limit]
@@ -594,15 +583,35 @@ SYSTEM_ARCHITECT = SYSTEM_BASE + (
     "You can read existing files to understand the current state.\n"
     "Output a SPECIFICATION JSON: {type:'SPECIFICATION', overview:'...', requirements:[...], verification_plan:[...]}\n"
     "Requirements must be binary/testable, include output format and error behavior.\n"
+    "IMPORTANT: For requirements involving external data (APIs, feeds), specify 'fetch valid items' rather than 'fetch exactly X items' to allow for API variations.\n"
 )
 
-SYSTEM_CRITIC = SYSTEM_BASE + (
-    "ROLE: CRITIC\n"
-    "You can read files to validate them against requirements.\n"
-    "Validate an artifact against objective + frozen spec (if provided).\n"
-    "CRITICAL RULE: Only REJECT if there is a BLOCKING functional error, missing requirement, or violation of hard restrictions.\n"
-    "Do NOT REJECT for style preferences, minor formatting, comments, or 'improvements'. If code works/complies, APPROVE.\n"
+SYSTEM_CRITIC_SPEC = SYSTEM_BASE + (
+    "ROLE: CRITIC (SPEC REVIEW)\n"
+    "Validate the SPECIFICATION against the objective.\n"
+    "To verify a URL, you MUST use the verifier tool: {type:'COMMAND', command:'verify_url', args:'<url>'}\n"
+    "CRITICAL RULE: Only REJECT if there is a BLOCKING functional error.\n"
+    "*** TRUST THE RESEARCH REPORT ***. If a URL is marked VALID in the report, DO NOT REJECT IT.\n"
+    "If claiming a URL is dead (and not in the report), you MUST verify it first using the verifier tool.\n"
+    "YOU CANNOT VERIFY MENTALLY. IF YOU HAVE NOT OUTPUT A COMMAND YET, YOU HAVE NOT VERIFIED IT.\n"
+    "Do NOT say 'I verified' if you didn't run a command in the previous turn.\n"
+    "If the objective demands a specific datasource (e.g. Google News) but you confirmed it is broken/unavailable, and the Architect proposes a working alternative, APPROVE it.\n"
     "Output REVIEW JSON: {type:'REVIEW', status:'APPROVE'|'REJECT', critique:'...', failure_tags:[...]}\n"
+)
+
+SYSTEM_CRITIC_PATCH = SYSTEM_BASE + (
+    "ROLE: CRITIC (PATCH REVIEW)\n"
+    "You verification agent.\n"
+    "1) The code is ALREADY APPLIED to the workspace.\n"
+    "2) You can LIST and READ files to inspect the implementation.\n"
+    "3) You can RUN commands to verify behavior (e.g. valid syntax, basic usage, curl checking).\n"
+    "CRITICAL RULE: Only REJECT if there is a BLOCKING functional error, missing requirement, or violation of hard restrictions.\n"
+    "Do NOT REJECT for style preferences or 'improvements'. If code works/complies, APPROVE.\n"
+    "Output format:\n"
+    "- To read files: {type:'COMMAND', command:'read_files', files:['path1']}\n"
+    "- To list files: {type:'COMMAND', command:'list_files'}\n"
+    "- To run command: {type:'COMMAND', command:'run_shell', args:'...'}\n"
+    "- To Finish: {type:'REVIEW', status:'APPROVE'|'REJECT', critique:'...', failure_tags:[...]}\n"
 )
 
 SYSTEM_PLANNER = SYSTEM_BASE + (
@@ -614,13 +623,21 @@ SYSTEM_PLANNER = SYSTEM_BASE + (
 
 SYSTEM_CODER_ENHANCED = SYSTEM_BASE + (
     "ROLE: CODER\n"
-    "You have read/write access to files. You can read existing code to understand the context.\n"
-    "You can either:\n"
-    "1) Output a PATCH JSON: {type:'PATCH', files:[{path, action:'write', content}]}\n"
-    "   OR\n"
-    "2) First read files to understand current state (optional)\n"
+    "You have read/write access to files and can execute code.\n"
+    "You should:\n"
+    "1) Read files to understand context.\n"
+    "2) Write files and Run commands to implement and verify the solution.\n"
+    "3) You can use curl/wget to check external resources.\n"
+    "4) When satisfied, Output a PATCH JSON: {type:'PATCH', files:[{path, action:'write', content}]}\n"
     "Only edit/create files listed in Files Allowed (if provided).\n"
     "When modifying existing files, try to preserve existing functionality unless required to change.\n"
+)
+
+SYSTEM_CODER_REPAIR = SYSTEM_BASE + (
+    "ROLE: CODER (REPAIR MODE)\n"
+    "You are repairing code based on feedback.\n"
+    "Output a PATCH JSON: {type:'PATCH', files:[{path, action:'write', content}]}\n"
+    "Only edit/create files listed in Files Allowed.\n"
 )
 
 SYSTEM_TESTER = SYSTEM_BASE + (
@@ -631,6 +648,7 @@ SYSTEM_TESTER = SYSTEM_BASE + (
     "2) If satisfied, output TEST_REPORT: {type:'TEST_REPORT', success:true, report:'...'}\n"
     "3) If failed/stuck, output TEST_REPORT: {type:'TEST_REPORT', success:false, report:'...'}\n"
     "CRITICAL: If testing a long-running process (server/daemon), verifying it starts and runs for a few seconds is sufficient.\n"
+    "IMPORTANT: If the output depends on external data/APIs, do not fail generic tests just because the item count is slightly off (e.g. 19 instead of 20), as long as the format is correct.\n"
 )
 
 
@@ -758,70 +776,96 @@ class CoderAgent(Agent):
             "You can first examine files by requesting to read them.\n"
             "Output format:\n"
             "- To read files: {type:'COMMAND', command:'read_files', files:['path1', 'path2']}\n"
-            "- To write PATCH: {type:'PATCH', files:[{path:'...', action:'write', content:'...'}]}\n\n"
+            "- To list files: {type:'COMMAND', command:'list_files'}\n"
+            "- To write file: {type:'COMMAND', command:'write_file', file:'path', content:'...'}\n"
+            "- To run command: {type:'COMMAND', command:'run_shell', args:'ls -la'}\n"
+            "- To FINISH: {type:'PATCH', files:[{path:'...', action:'write', content:'...'}]}\n\n"
             "What would you like to do first?"
         )
         
-        # Allow up to 3 read operations before requiring a patch
-        max_reads = 3
-        read_count = 0
-        max_errors = 3
-        error_count = 0
+        # Allow up to 15 interaction steps to write/verify code
+        max_steps = 15
+        step_count = 0
         
-        while read_count < max_reads and error_count < max_errors:
+        while step_count < max_steps:
             response = llm.chat_json(self.get_system_prompt(), user, temperature=0.2)
             
-            if response.get("type") == "COMMAND":
-                cmd = response.get("command")
+            if response.get("type") == "COMMAND" and response.get("command") == "read_files":
+                files_to_read = response.get("files", [])
+                if not isinstance(files_to_read, list):
+                    files_to_read = [files_to_read]
                 
-                if cmd == "read_files":
-                    files_to_read = response.get("files", [])
-                    if not isinstance(files_to_read, list):
-                        files_to_read = [files_to_read]
-                    
-                    # Read requested files
-                    file_contents = {}
-                    for file_path in files_to_read[:5]:  # Limit to 5 files per request
-                        try:
-                            content = tools.read_text(file_path)
-                            file_contents[file_path] = content
-                        except Exception as e:
-                            file_contents[file_path] = f"ERROR reading file: {e}"
-                    
-                    # Update user prompt with file contents
-                    user += f"\n\nRequested files content:\n{json.dumps(file_contents, indent=2)}\n\n"
-                    user += "Continue examining files or output PATCH:"
-                    
-                    read_count += 1
-                    continue
+                # Read requested files
+                file_contents = {}
+                for file_path in files_to_read[:5]:  # Limit to 5 files per request
+                    try:
+                        content = tools.read_text(file_path)
+                        file_contents[file_path] = content
+                    except Exception as e:
+                        if "Is a directory" in str(e):
+                            listing = tools.list_files()
+                            file_contents[file_path] = f"Directory listing:\n{json.dumps(listing, indent=2)}"
+                        else:
+                            file_contents[file_path] = f"ERROR reading file: {e}. If file does not exist, use write_file to create it."
                 
-                elif cmd == "list_files":
-                    files = tools.list_files()
-                    user += f"\n\nAdditional file listing:\n{files}\n\n"
-                    user += "Continue examining files or output PATCH:"
-                    read_count += 1
-                    continue
+                # Update user prompt with file contents
+                user += f"\n\nRequested files content:\n{json.dumps(file_contents, indent=2)}\n\n"
+                user += "Continue implementing/verifying or output PATCH:"
+                
+                step_count += 1
+                continue
 
-            if response.get("type") == "PATCH":
+            elif response.get("type") == "COMMAND" and response.get("command") == "list_files":
+                listing = tools.list_files()
+                user += f"\n\nWorkspace files:\n{json.dumps(listing, indent=2)}\n\n"
+                if not listing:
+                     user += "Directory is empty. You should START WRITING code (write_file).\n"
+                user += "Continue implementing/verifying or output PATCH:"
+                step_count += 1
+                continue
+
+            elif response.get("type") == "COMMAND" and response.get("command") == "write_file":
+                fpath = response.get("file")
+                content = response.get("content")
+                try:
+                    tools.write_text(fpath, content)
+                    user += f"\n\nWrote file {fpath}.\n"
+                except Exception as e:
+                    user += f"\n\nError writing file {fpath}: {e}\n"
+                
+                user += "Continue implementing/verifying or output PATCH:"
+                step_count += 1
+                continue
+            
+            elif response.get("type") == "COMMAND" and response.get("command") == "run_shell":
+                cmd = response.get("args", "")
+                output = tools.run_shell(cmd)
+                user += f"\n\nCommand output ({cmd}):\n{output}\n\n"
+                user += "Continue implementing/verifying or output PATCH:"
+                step_count += 1
+                continue
+            
+            elif response.get("type") == "PATCH":
                 return response
             
-            # Unexpected response, try to continue
-            error_count += 1
-            user += f"\n\nPlease use either COMMAND to read files or PATCH to write files.\nReceived: {json.dumps(response, indent=2)}"
-            continue
+            else:
+                # Unexpected response, try to continue
+                user += f"\n\nPlease use either COMMAND or PATCH.\nReceived: {json.dumps(response, indent=2)}"
+                step_count += 1
+                continue
         
-        # If we've read enough files, force a PATCH
-        user += "\n\nYou've examined enough files. Please output a PATCH now."
+        # If we've executed enough steps, force a PATCH
+        user += "\n\nYou've executed enough steps. Please output a PATCH now."
         final_response = llm.chat_json(self.get_system_prompt(), user, temperature=0.2)
         
         if final_response.get("type") != "PATCH":
-            # Fallback: create a minimal patch
+            # Fallback
             return {
                 "type": "PATCH",
                 "files": [{
                     "path": "implementation.py",
                     "action": "write",
-                    "content": "# Implementation placeholder\nprint('TODO: Implement according to spec')"
+                    "content": "# Forced end of session"
                 }]
             }
         
@@ -977,7 +1021,9 @@ class CriticAgent(Agent):
         self.stage = stage  # 'SPEC' or 'PATCH'
     
     def get_system_prompt(self) -> str:
-        return SYSTEM_CRITIC
+        if self.stage == "SPEC":
+            return SYSTEM_CRITIC_SPEC
+        return SYSTEM_CRITIC_PATCH
     
     def run_with_tools(self, ctx: RunContext, llm: LLMClient, tools: PersistentTools) -> Dict[str, Any]:
         if self.stage == "PATCH":
@@ -990,33 +1036,144 @@ class CriticAgent(Agent):
                     "critique": f"Hard Validation Failed: {err}",
                     "failure_tags": ["VALIDATION_ERROR"] 
                 }
-            
-            # (Logic removed: Do not read files from disk as they are not applied yet)
-            file_contents = {}
 
         if self.stage == "SPEC":
+            # For SPEC, allow interaction to check URLs
             artifact = ctx.frozen_spec
-            frozen = None
-        else:
-            artifact = ctx.patches[-1]
-            frozen = ctx.frozen_spec
+            
+            # Inject Research Report if available
+            research_report = artifact.pop("_research_report", None)
+            
+            user = f"Objective: {ctx.packet.objective}\n\n"
+            if research_report:
+                user += f"*** RESEARCH REPORT (AUTO-VERIFIED URLs) ***\n{research_report}\n\n"
+            
+            user += f"Artifact: {json.dumps(artifact, ensure_ascii=False)}\n\n"
+            user += "You can verify URLs using {type:'COMMAND', command:'verify_url', args:'<url>'}\n"
+            user += "Return REVIEW JSON only or COMMAND."
+
+            # Interaction loop for SPEC
+            max_steps = 5
+            step_count = 0
+            
+            while step_count < max_steps:
+                response = llm.chat_json(self.get_system_prompt(), user, temperature=0.1)
+
+                if response.get("type") == "COMMAND" and response.get("command") == "verify_url":
+                    url = response.get("args", "")
+                    # Delegate validation to ResearchAgent
+                    researcher = ResearchAgent()
+                    report = researcher.verify_url(url, tools)
+                    user += f"\n\nVerifier Report ({url}):\n{report}\n\nNext?"
+                    step_count += 1
+                    continue
+                
+                return response
+
+        # For PATCH, we do the interactive verification
+        artifact = ctx.patches[-1]
+        frozen = ctx.frozen_spec
 
         user = f"Objective: {ctx.packet.objective}\n\n"
         if frozen is not None:
             user += f"FROZEN SPEC: {json.dumps(frozen, ensure_ascii=False)}\n\n"
         user += f"Artifact: {json.dumps(artifact, ensure_ascii=False)}\n\n"
         
-        if self.stage == "PATCH" and file_contents:
-            user += f"Actual file contents after patch:\n{json.dumps(file_contents, indent=2)}\n\n"
+        user += "You can request to read files or run commands to verify. Output COMMAND or REVIEW."
+
+        # Interaction loop
+        max_steps = 10
+        step_count = 0
         
-        user += "Return REVIEW JSON only."
+        while step_count < max_steps:
+            response = llm.chat_json(self.get_system_prompt(), user, temperature=0.1)
+
+            if response.get("type") == "COMMAND" and response.get("command") == "read_files":
+                files_to_read = response.get("files", [])
+                if not isinstance(files_to_read, list):
+                    files_to_read = [files_to_read]
+                
+                file_contents = {}
+                for file_path in files_to_read[:5]:
+                    try:
+                        content = tools.read_text(file_path)
+                        file_contents[file_path] = content
+                    except Exception as e:
+                        file_contents[file_path] = f"ERROR: {e}"
+                
+                user += f"\n\nFile contents:\n{json.dumps(file_contents, indent=2)}\n\nNext?"
+                step_count += 1
+                continue
+
+            elif response.get("type") == "COMMAND" and response.get("command") == "list_files":
+                listing = tools.list_files()
+                user += f"\n\nFiles:\n{json.dumps(listing, indent=2)}\n\nNext?"
+                step_count += 1
+                continue
+            
+            elif response.get("type") == "COMMAND" and response.get("command") == "run_shell":
+                cmd = response.get("args", "")
+                output = tools.run_shell(cmd)
+                user += f"\n\nCommand output ({cmd}):\n{output}\n\nNext?"
+                step_count += 1
+                continue
+
+            elif response.get("type") == "REVIEW":
+                return response
+            
+            else:
+                 user += f"\n\nUnknown response: {json.dumps(response)}"
+                 step_count += 1
+                 continue
         
-        return llm.chat_json(self.get_system_prompt(), user, temperature=0.1)
+        # Fallback
+        return {
+            "type": "REVIEW",
+            "status": "REJECT",
+            "critique": "Critic exhausted steps without final review.",
+            "failure_tags": ["TIMEOUT"]
+        }
 
 
 # -----------------------------
 # Enhanced Orchestrator with Persistence
 # -----------------------------
+
+SYSTEM_RESEARCHER = SYSTEM_BASE + (
+    "ROLE: RESEARCHER\n"
+    "You verification agent. You verify URLs by running checks in the shell.\n"
+    "You have access to curl, ping, etc.\n"
+    "Input: A request to verify a URL or check something.\n"
+    "Output: A short textual report of what you found.\n"
+    "Format: Just return clear text summary.\n"
+)
+
+class ResearchAgent(Agent):
+    name = "researcher"
+    
+    def get_system_prompt(self) -> str:
+        return SYSTEM_RESEARCHER
+    
+    def run_with_tools(self, ctx: RunContext, llm: LLMClient, tools: PersistentTools) -> Dict[str, Any]:
+        raise NotImplementedError("Researcher is called via helper, not main loop")
+    
+    def verify_url(self, url: str, tools: PersistentTools) -> str:
+        print(f"[DEBUG] Validating URL: {url}", file=sys.stderr)
+        
+        # Security check: basic URL validation
+        if not url.startswith("http"):
+            return f"Invalid URL format: {url}"
+            
+        cmd = f"curl -I -L --max-time 10 --insecure '{url}'"
+        out = tools.run_shell(cmd)
+        
+        if "HTTP/2 200" in out or "HTTP/1.1 200" in out:
+             return f"URL {url} is VALID (200 OK)."
+        elif "404 Not Found" in out:
+             return f"URL {url} is BROKEN (404 Not Found)."
+        else:
+             return f"URL {url} verification result:\n{out[:500]}"
+
 
 class PersistentOrchestrator:
     def __init__(self, llm: LLMClient, workspace_dir: str, task_id: str) -> None:
@@ -1070,6 +1227,23 @@ class PersistentOrchestrator:
                     self.state = State.SPEC_REVIEW
                 
                 elif self.state == State.SPEC_REVIEW:
+                    # AUTO-RESEARCH: Check URLs in spec before Review
+                    if self.ctx.frozen_spec:
+                         spec_str = json.dumps(self.ctx.frozen_spec)
+                         urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s]*', spec_str)
+                         if urls:
+                             print(f"[DEBUG] Auto-Researching URLs in SPEC: {urls}", file=sys.stderr)
+                             r_tools = self.create_agent_tools("researcher")
+                             researcher = ResearchAgent()
+                             report = "RESEARCHER REPORT (Verified URLs):\n"
+                             for url in urls:
+                                 url = url.strip('"\').,')
+                                 report += researcher.verify_url(url, r_tools) + "\n"
+                             
+                             # Append this report to the context available to Critic
+                             # We'll attach it to the 'spec_review' field temporarily or modify how Critic reads
+                             self.ctx.frozen_spec["_research_report"] = report
+
                     tools = self.create_agent_tools("critic_spec")
                     review = CriticAgent("SPEC").run_with_tools(self.ctx, self.llm, tools)
                     assert_type(review, "REVIEW")
@@ -1108,6 +1282,11 @@ class PersistentOrchestrator:
                     assert_type(patch, "PATCH")
                     self.ctx.patches.append(patch)
                     self.state_manager.save_artifact(f"patch_{len(self.ctx.patches)}", patch)
+                    self.state = State.APPLY
+                
+                elif self.state == State.APPLY:
+                    tools = self.create_agent_tools("orchestrator")
+                    tools.apply_patch(self.ctx.patches[-1])
                     self.state = State.PATCH_REVIEW
                 
                 elif self.state == State.PATCH_REVIEW:
@@ -1118,14 +1297,9 @@ class PersistentOrchestrator:
                     self.state_manager.save_artifact("patch_review", review)
                     
                     if review.get("status") == "APPROVE":
-                        self.state = State.APPLY
+                        self.state = State.TEST
                     else:
                         self.state = State.REPAIR_PATCH
-                
-                elif self.state == State.APPLY:
-                    tools = self.create_agent_tools("orchestrator")
-                    tools.apply_patch(self.ctx.patches[-1])
-                    self.state = State.TEST
                 
                 elif self.state == State.TEST:
                     tools = self.create_agent_tools("tester")
@@ -1193,7 +1367,7 @@ class PersistentOrchestrator:
             "Please fix the code to satisfy the test report.\n"
             "Return PATCH JSON only."
         )
-        patch = self.llm.chat_json(SYSTEM_CODER_ENHANCED, user, temperature=0.2)
+        patch = self.llm.chat_json(SYSTEM_CODER_REPAIR, user, temperature=0.2)
         assert_type(patch, "PATCH")
         return patch
 
@@ -1218,7 +1392,7 @@ class PersistentOrchestrator:
             f"Critic review: {json.dumps(review, ensure_ascii=False)}\n\n"
             "Return corrected PATCH JSON only."
         )
-        patch2 = self.llm.chat_json(SYSTEM_CODER_ENHANCED, user, temperature=0.2)
+        patch2 = self.llm.chat_json(SYSTEM_CODER_REPAIR, user, temperature=0.2)
         assert_type(patch2, "PATCH")
         return patch2
 

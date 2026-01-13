@@ -1,44 +1,78 @@
-# AI Agent Orchestration
+# AI Agent Orchestration Framework
 
-This project implements an autonomous AI agent orchestration system designed to generate software artifacts through a structured workflow. It uses a multi-agent architecture to specify, plan, code, review, and test software solutions.
+This project implements a robust, state-machine-driven AI agent orchestration system designed to autonomously generate, review, and test software artifacts. It features a sophisticated multi-agent architecture with persistent state management, enabling complex software development workflows.
+
+## Features
+
+- **Multi-Agent Architecture**: Specialized agents for different stages of the SDLC:
+  - **Architect**: Drafts detailed software specifications.
+  - **Critic**: Reviews specifications and code patches, enforcing strict quality and functional requirements.
+  - **Planner**: Devises step-by-step implementation plans.
+  - **Coder**: Implements the plan by generating code patches.
+  - **Tester**: Verifies the implementation against the original requirements.
+  - **Researcher**: Validates external resources like URLs and APIs.
+
+- **Persistent State Management**:
+  - Automatically saves the full execution context (specs, plans, patches, reviews) to `.agent_state/`.
+  - Resumes interrupted tasks seamlessly.
+  - Maintains a history of all generated artifacts.
+
+- **Safety & Verification**:
+  - **Auto-Research**: Automatically detects and validates URLs in specifications using the Researcher agent.
+  - **Change Logging**: Creates snapshots of files before modification, allowing for safe rollbacks and diffs.
+  - **Restricted Tooling**: Agents operate with defined permission scopes.
 
 ## Architecture
 
-The system operates as a state machine with the following states:
-- **SPEC**: Architect agent creates a software specification.
-- **SPEC_REVIEW**: Critic agent reviews the specification.
-- **PLAN**: Planner agent creates a step-by-step implementation plan.
-- **PATCH**: Coder agent writes code (patches) to implement the plan.
-- **PATCH_REVIEW**: Critic agent reviews the code patch.
-- **APPLY**: Patches are applied to the workspace.
-- **TEST**: Tester agent verifies the implementation.
-- **REPAIR**: If tests or reviews fail, the system enters a repair loop.
+The system operates as a finite state machine:
+
+1.  **SPEC**: Architect creates a specification.
+2.  **SPEC_REVIEW**: Critic reviews the spec. If approved, proceeds to PLAN. If rejected, goes to SPEC_REPAIR.
+    - *Auto-Research runs here to pre-validate external links.*
+3.  **SPEC_REPAIR**: Architect refines the spec based on feedback.
+4.  **PLAN**: Planner breaks down the spec into actionable steps.
+5.  **PATCH**: Coder generates a file system patch (create/edit files).
+6.  **APPLY**: The patch is applied to the workspace.
+7.  **PATCH_REVIEW**: Critic examines the applied changes.
+8.  **TEST**: Tester runs verification commands.
+9.  **REPAIR_PATCH**: If tests or patch reviews fail, the Coder attempts to fix the issues.
+10. **DONE**: Workflow completes successfully or errors out.
 
 ## Setup
 
-1.  Clone the repository.
-2.  Install dependencies:
+1.  **Clone the repository**:
+    ```bash
+    git clone <repository-url>
+    cd <repository-directory>
+    ```
+
+2.  **Install Dependencies**:
+    The project uses standard Python libraries. `python-dotenv` is recommended for managing API keys.
     ```bash
     pip install python-dotenv
     ```
-    *Note: The project uses standard libraries, but `python-dotenv` is recommended for environment management.*
-3.  Copy `env.example` to `.env`.
+
+3.  **Configuration**:
+    Copy `env.example` to `.env` and add your LLM API keys.
     ```bash
     cp env.example .env
     ```
-4.  Configure your LLM credentials in `.env`.
 
 ## Usage
 
 Run the orchestrator with a natural language objective:
 
 ```bash
-python main_v2.py "Create a python script that prints the first 10 Fibonacci numbers"
+python main.py "Create a python script that fetches the latest BTC price and saves it to a CSV file"
 ```
 
-### Resuming Tasks
+The system will create a task-specific directory (e.g., `task_<timestamp>`) or work in the current directory depending on configuration, creating a `.agent_state` folder to track progress.
 
-To resume an interrupted task, set the `RESUME` environment variable or use the automatic resumption logic if the `task_id` matches.
+## Project Structure
+
+- `main.py`: Core entry point containing the `PersistentOrchestrator`, `StateManager`, and Agent definitions.
+- `.agent_state/`: Directory where runtime context, artifacts, and file snapshots are stored.
+- `logs/`: Execution logs (if configured).
 
 ## License
 
