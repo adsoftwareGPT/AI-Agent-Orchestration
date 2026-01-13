@@ -754,38 +754,50 @@ class CoderAgent(Agent):
         # Allow up to 3 read operations before requiring a patch
         max_reads = 3
         read_count = 0
+        max_errors = 3
+        error_count = 0
         
-        while read_count < max_reads:
+        while read_count < max_reads and error_count < max_errors:
             response = llm.chat_json(self.get_system_prompt(), user, temperature=0.2)
             
-            if response.get("type") == "COMMAND" and response.get("command") == "read_files":
-                files_to_read = response.get("files", [])
-                if not isinstance(files_to_read, list):
-                    files_to_read = [files_to_read]
+            if response.get("type") == "COMMAND":
+                cmd = response.get("command")
                 
-                # Read requested files
-                file_contents = {}
-                for file_path in files_to_read[:5]:  # Limit to 5 files per request
-                    try:
-                        content = tools.read_text(file_path)
-                        file_contents[file_path] = content
-                    except Exception as e:
-                        file_contents[file_path] = f"ERROR reading file: {e}"
+                if cmd == "read_files":
+                    files_to_read = response.get("files", [])
+                    if not isinstance(files_to_read, list):
+                        files_to_read = [files_to_read]
+                    
+                    # Read requested files
+                    file_contents = {}
+                    for file_path in files_to_read[:5]:  # Limit to 5 files per request
+                        try:
+                            content = tools.read_text(file_path)
+                            file_contents[file_path] = content
+                        except Exception as e:
+                            file_contents[file_path] = f"ERROR reading file: {e}"
+                    
+                    # Update user prompt with file contents
+                    user += f"\n\nRequested files content:\n{json.dumps(file_contents, indent=2)}\n\n"
+                    user += "Continue examining files or output PATCH:"
+                    
+                    read_count += 1
+                    continue
                 
-                # Update user prompt with file contents
-                user += f"\n\nRequested files content:\n{json.dumps(file_contents, indent=2)}\n\n"
-                user += "Continue examining files or output PATCH:"
-                
-                read_count += 1
-                continue
-            
-            elif response.get("type") == "PATCH":
+                elif cmd == "list_files":
+                    files = tools.list_files()
+                    user += f"\n\nAdditional file listing:\n{files}\n\n"
+                    user += "Continue examining files or output PATCH:"
+                    read_count += 1
+                    continue
+
+            if response.get("type") == "PATCH":
                 return response
             
-            else:
-                # Unexpected response, try to continue
-                user += f"\n\nPlease use either COMMAND to read files or PATCH to write files.\nReceived: {json.dumps(response, indent=2)}"
-                continue
+            # Unexpected response, try to continue
+            error_count += 1
+            user += f"\n\nPlease use either COMMAND to read files or PATCH to write files.\nReceived: {json.dumps(response, indent=2)}"
+            continue
         
         # If we've read enough files, force a PATCH
         user += "\n\nYou've examined enough files. Please output a PATCH now."
