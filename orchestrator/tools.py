@@ -232,18 +232,13 @@ class PersistentTools:
                 raise RuntimeError("PATCH content must be string")
             self.write_text(path, content)
 
-    def run_shell(self, command: str) -> str:
-        # Basic security: only allow running in workspace
-        print("[DEBUG] EXECUTING:", command, file=sys.stderr)
-
+    def _check_command_security(self, command: str) -> Optional[str]:
         # 1. Check blacklist
         for pattern in BLACKLIST_PATTERNS:
             if re.search(pattern, command):
                 return f"ERROR: Command blocked by blacklist pattern: {pattern}"
 
         # 2. Check whitelist (simple heuristic: first token)
-        # Handle simple chaining like "ls -la | grep x" by checking the first command
-        # This is not a perfect parser, just a basic safety net requested by user.
         parts = command.strip().split()
         if not parts:
             return "ERROR: Empty command"
@@ -254,9 +249,30 @@ class PersistentTools:
         
         if base_cmd not in ALLOWED_COMMANDS and not is_local_script:
              return f"ERROR: Command '{base_cmd}' not in allowed list."
+        return None
+
+    def run_shell_structured(self, command: str) -> Dict[str, Any]:
+        """
+        Run a shell command and return structured output.
+        Returns: {
+            "exit_code": int,
+            "stdout": str,
+            "stderr": str,
+            "timed_out": bool
+        }
+        """
+        print("[DEBUG] EXECUTING (structured):", command, file=sys.stderr)
+
+        security_error = self._check_command_security(command)
+        if security_error:
+            return {
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": security_error,
+                "timed_out": False
+            }
 
         is_background = bool(re.search(r"(^|\s)&\s*$", command.strip()))
-
 
         try:
             if is_background:
@@ -264,27 +280,71 @@ class PersistentTools:
                     ["bash", "-lc", f"{command} echo __PID__=$!"],
                     cwd=self.workspace_dir,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    stderr=subprocess.STDOUT, # Merge stderr for background (legacy behavior, or keep separate?)
+                    # For structured, we prefer separation, but background logic here merges.
+                    # Let's keep it simple for background: it is not easily fully structured in one go without wait.
                     text=True,
                 )
                 try:
                     out, _ = proc.communicate(timeout=SHELL_BACKGROUND_TIMEOUT)
-                    return (out or "").strip()
+                    # Background commands return 0 if launched successfully
+                    return {
+                        "exit_code": 0,
+                        "stdout": (out or "").strip(),
+                        "stderr": "",
+                        "timed_out": False
+                    }
                 except subprocess.TimeoutExpired:
-                    return "ERROR: Background launch timed out"
+                    return {
+                        "exit_code": -1, 
+                        "stdout": "",
+                        "stderr": "Background launch timed out",
+                        "timed_out": True
+                    }
 
             # Normal (foreground) command
             res = subprocess.run(
                 command, 
                 shell=True,
                 cwd=self.workspace_dir, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
+                capture_output=True,
                 timeout=SHELL_TIMEOUT,
                 text=True
             )
-            return res.stdout or ""
+            return {
+                "exit_code": res.returncode,
+                "stdout": res.stdout or "",
+                "stderr": res.stderr or "",
+                "timed_out": False
+            }
         except subprocess.TimeoutExpired:
-            return "ERROR: TimeoutExpired"
+            return {
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": "TimeoutExpired",
+                "timed_out": True
+            }
         except Exception as e:
-            return f"ERROR: {e}"
+             return {
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": f"Exception: {e}",
+                "timed_out": False
+            }
+
+    def run_shell(self, command: str) -> str:
+        # Use structured underneath but return legacy string
+        res = self.run_shell_structured(command)
+        
+        if res["timed_out"]:
+            return f"ERROR: {res['stderr']}"
+        
+        output = res["stdout"]
+        if res["stderr"]:
+            output += f"\nSTDERR:\n{res['stderr']}"
+        
+        if res["exit_code"] != 0 and not output.strip():
+            # If failed and no output, show exit code
+            return f"Command failled with exit code {res['exit_code']}"
+            
+        return output

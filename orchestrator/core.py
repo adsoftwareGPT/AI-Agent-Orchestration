@@ -8,6 +8,7 @@ from .types import RunContext, State, TaskPacket
 from .state import StateManager
 from .tools import PersistentTools
 from .llm import LLMClient, assert_type
+from .gates import GateRunner, extract_gates_from_spec
 from .agents import (
     ArchitectAgent,
     CoderAgent,
@@ -130,8 +131,26 @@ class PersistentOrchestrator:
                 elif self.state == State.APPLY:
                     tools = self.create_agent_tools("orchestrator")
                     try:
-                        tools.apply_patch(self.ctx.patches[-1])
-                        self.state = State.PATCH_REVIEW
+                        patch = self.ctx.patches[-1]
+                        tools.apply_patch(patch)
+                        
+                        # Python Gate: Check existence and syntax
+                        gate_runner = GateRunner(tools)
+                        res = gate_runner.run_apply_gates(patch["files"])
+                        
+                        if res.passed:
+                            self.state = State.PATCH_REVIEW
+                        else:
+                            print(f"[DEBUG] Apply Gate Failed: {res.reason}", file=sys.stderr)
+                            # Create a failure report to guide repair
+                            failure_report = {
+                                "success": False,
+                                "report": f"Apply Gate Check Failed.\nReason: {res.reason}\nEvidence: {json.dumps(res.evidence)}"
+                            }
+                            # Treat this as a test failure for repair purposes
+                            self.ctx.test_reports.append(failure_report)
+                            self.state = State.REPAIR_PATCH
+
                     except Exception as e:
                         print(f"[DEBUG] Failed to apply patch: {e}", file=sys.stderr)
                         self.state = State.FAILED
@@ -143,22 +162,45 @@ class PersistentOrchestrator:
                     self.ctx.patch_review = review
                     self.state_manager.save_artifact("patch_review", review)
                     
-                    if review.get("status") == "APPROVE":
-                        self.state = State.TEST
-                    else:
-                        self.state = State.REPAIR_PATCH
+                    # Policy: Critic is advisor only. Hard gates are handled in APPLY.
+                    # We proceed to TEST regardless of Critic's opinion on style/logic,
+                    # unless it identified a HARD BLOCKER (which we assume APPLY caught, but if not, we proceed to TEST anyway to fail deterministically).
+                    print("[DEBUG] Critic Review saved. Proceeding to TEST (Advisor Mode).", file=sys.stderr)
+                    self.state = State.TEST
                 
                 elif self.state == State.TEST:
                     tools = self.create_agent_tools("tester")
-                    test_report = TesterAgent().run_with_tools(self.ctx, self.llm, tools)
-                    assert_type(test_report, "TEST_REPORT")
+                    
+                    # 1. Extract gates from SPEC
+                    spec_gates = extract_gates_from_spec(self.ctx.frozen_spec or {}, self.ctx.packet.objective)
+                    print(f"[DEBUG] Running Spec Gates: {spec_gates.keys()}", file=sys.stderr)
+
+                    # 2. Run gates deterministically
+                    gate_runner = GateRunner(tools)
+                    results = gate_runner.run_spec_gates(spec_gates)
+                    
+                    # 3. Analyze results
+                    all_passed = all(r.passed for r in results)
+                    
+                    report_text = "GATE EXECUTION REPORT:\n"
+                    for i, r in enumerate(results):
+                        status = "PASS" if r.passed else "FAIL"
+                        report_text += f"{i+1}. [{status}] {r.reason}\n   Evidence: {json.dumps(r.evidence)}\n"
+                    
+                    test_report = {
+                        "type": "TEST_REPORT",
+                        "success": all_passed,
+                        "report": report_text
+                    }
+                    
                     self.ctx.test_reports.append(test_report)
                     self.state_manager.save_artifact(f"test_report_{len(self.ctx.test_reports)}", test_report)
                     
-                    if test_report.get("success"):
-                        print("[DEBUG] Test passed! Success.", file=sys.stderr)
+                    if all_passed:
+                        print("[DEBUG] All gates passed! Success.", file=sys.stderr)
                         self.state = State.DONE
                     else:
+                        print("[DEBUG] Gates failed.", file=sys.stderr)
                         if self.repair_count < self.max_repairs:
                             self.repair_count += 1
                             self.state = State.REPAIR_PATCH
