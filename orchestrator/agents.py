@@ -205,9 +205,16 @@ class CoderAgent(Agent):
             if response.get("type") == "COMMAND":
                 output = self.execute_command(response, tools)
                 
-                # Loop detection
+                # Loop detection: If output is identical to last time, warn the agent harder or force a break
                 if output == last_output:
-                     output += "\nSYSTEM WARNING: You just ran this command and got the exact same output. blocked. Do NOT repeat. Try 'write_file' or 'run_shell'."
+                     # Force a clearer warning that disrupts the loop
+                     warning_msg = (
+                         "\nSYSTEM WARNING: You just ran this command and got the exact same output as before. "
+                         "You are stuck in a loop. "
+                         "STOP running 'list_files' or 'read_files' if you already know the state. "
+                         "Write code now using 'write_file' or FINISH with a PATCH."
+                     )
+                     output += warning_msg
                 last_output = output
 
                 user += f"\n\n{output}\n"
