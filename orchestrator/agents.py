@@ -63,7 +63,7 @@ class Agent:
         elif cmd == "list_files":
             listing = tools.list_files()
             if not listing:
-                return "Directory is empty."
+                return "Directory is empty. (No files locally). You should write some code."
             return f"List Files Output:\n{json.dumps(listing, indent=2)}"
             
         elif cmd == "write_file":
@@ -197,12 +197,19 @@ class CoderAgent(Agent):
         # Allow up to 15 interaction steps to write/verify code
         max_steps = MAX_CODER_STEPS
         step_count = 0
+        last_output = None
         
         while step_count < max_steps:
             response = llm.chat_json(self.get_system_prompt(), user, temperature=DEFAULT_TEMPERATURE)
             
             if response.get("type") == "COMMAND":
                 output = self.execute_command(response, tools)
+                
+                # Loop detection
+                if output == last_output:
+                     output += "\nSYSTEM WARNING: You just ran this command and got the exact same output. blocked. Do NOT repeat. Try 'write_file' or 'run_shell'."
+                last_output = output
+
                 user += f"\n\n{output}\n"
                 user += "Continue implementing/verifying or output PATCH:"
                 step_count += 1
