@@ -18,8 +18,13 @@ LLM_CONFIGS = {
 ACTIVE_LLM = os.environ.get("ACTIVE_LLM", "deepseek")
 
 # Security constraints
-ALLOWED_COMMANDS = {"ls", "cat", "curl", "python", "python3", "pip", "pip3", "git", "grep", "tail", "head", "wc", "find"}
-BLACKLIST_PATTERNS = [r"rm\s+-rf", r"sudo", r">\s+/dev/", r"&\s*$"]
+# Allowed commands now acts as a "common safe list" but we will rely more on blacklist for flexibility
+ALLOWED_COMMANDS = {
+    "ls", "cat", "curl", "python", "python3", "pip", "pip3", "git", "grep", "tail", "head", "wc", "find", 
+    "sqlite3", "node", "npm", "echo", "pwd", "mkdir", "rm", "cp", "mv", "touch"
+}
+BLACKLIST_PATTERNS = [r"rm\s+-rf\s+/", r"sudo", r">\s+/dev/sd", r"mkfs", r"dd\s+if="]
+
 
 # LLM Settings
 LLM_RETRIES = 3
